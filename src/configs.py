@@ -1,5 +1,10 @@
 import argparse
-from outputs import configure_logging
+from outputs import configure_logging as _configure_logging
+
+
+def configure_logging():
+    """Настройка логирования (перенаправление в outputs)."""
+    _configure_logging()
 
 
 def configure_argument_parser(available_modes):
