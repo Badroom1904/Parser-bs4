@@ -115,7 +115,7 @@ def download(session):
 
     with open(archive_path, 'wb') as file:
         with tqdm(
-                total=total_size, unit='B', unit_scale=True, desc=filename
+            total=total_size, unit='B', unit_scale=True, desc=filename
         ) as pbar:
             for chunk in response.iter_content(chunk_size=8192):
                 file.write(chunk)
@@ -177,32 +177,71 @@ def process_pep_row(row, session):
     return actual_status, expected_statuses, pep_url
 
 
-def pep(session):
-    """Парсинг страниц PEP."""
-    response = get_response(session, PEP_URL)
+def parse_pep_page(session, url):
+    """Парсит одну страницу со списком PEP."""
+    response = get_response(session, url)
     if response is None:
-        return
+        return [], None
 
     soup = BeautifulSoup(response.text, features='lxml')
-    table = soup.find('table', attrs={'class': 'pep-zero-table'})
-    if not table:
-        logging.error('Таблица с PEP не найдена')
-        return
 
-    rows = table.find('tbody').find_all('tr')
+    # Находим ВСЕ таблицы с классом pep-zero-table
+    tables = soup.find_all('table', attrs={'class': 'pep-zero-table'})
+    if not tables:
+        logging.error(f'Таблицы с PEP не найдены на странице {url}')
+        return [], None
+
+    all_rows = []
+    for table in tables:
+        rows = table.find_all('tr')
+        if rows:
+            # Пропускаем заголовок в каждой таблице
+            all_rows.extend(rows[1:])
+
+    if not all_rows:
+        return [], None
+
+    # Ищем ссылку на следующую страницу
+    next_page = None
+    nav = soup.find('nav', attrs={'aria-label': 'Page navigation'})
+    if nav:
+        next_link = nav.find('a', attrs={'rel': 'next'})
+        if next_link:
+            next_page = urljoin(url, next_link.get('href'))
+
+    return all_rows, next_page
+
+
+def pep(session):
+    """Парсинг страниц PEP с пагинацией."""
     status_count = {}
     mismatched_peps = []
+    current_url = PEP_URL
+    page_number = 1
 
-    for row in tqdm(rows, desc='Обработка PEP'):
-        result = process_pep_row(row, session)
-        actual_status, expected_statuses, pep_url = result
-        if actual_status is None:
-            continue
+    while current_url:
+        logging.info(f'Загрузка страницы {page_number}: {current_url}')
+        rows, next_url = parse_pep_page(session, current_url)
 
-        if expected_statuses and actual_status not in expected_statuses:
-            mismatched_peps.append((pep_url, actual_status, expected_statuses))
+        if not rows:
+            logging.warning(f'На странице {current_url} нет данных')
+            break
 
-        status_count[actual_status] = status_count.get(actual_status, 0) + 1
+        for row in tqdm(rows, desc=f'Обработка PEP (страница {page_number})'):
+            result = process_pep_row(row, session)
+            actual_status, expected_statuses, pep_url = result
+            if actual_status is None:
+                continue
+
+            if expected_statuses and actual_status not in expected_statuses:
+                mismatched_peps.append((
+                    pep_url, actual_status, expected_statuses))
+
+            status_count[
+                actual_status] = status_count.get(actual_status, 0) + 1
+
+        current_url = next_url
+        page_number += 1
 
     if mismatched_peps:
         logging.info('Несовпадающие статусы:')
@@ -212,8 +251,8 @@ def pep(session):
             logging.info(f'Ожидаемые статусы: {list(expected)}')
 
     results = [('Статус', 'Количество')]
-    for status, count in sorted(status_count.items()):
-        results.append((status, str(count)))
+    results.extend((
+        status, str(count)) for status, count in sorted(status_count.items()))
 
     total_count = sum(status_count.values())
     results.append(('Total', str(total_count)))
